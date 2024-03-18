@@ -1,0 +1,1163 @@
+' version 1.0 	' add trig chan, 
+			' add function to add/delete spikes
+' version 2.1 	' use array and function to simplify the program
+' Version 3.1 	' add loop to use the same setting to analyze new time window
+			' allow selection of phase reference channel
+			' allow phase analysis for neurons with differtn burst 
+			' allow phase analysis for neurons with differtn burst #
+' version 3.3	' add dutycycle analysis
+' version 3.4	' use arry to record statistics results from each paramter
+' Version 3.5	' allow phase analysis with selected channels
+			' simplify the file information print
+			' allow reanalyze the bursts channel
+			' allow analysis with single burst
+			' fix bug in phase analysis when dealing with reference channels
+			' confirmed with the original Crab-Analyzer for data process acuuray
+' Version 4.1	' add end time restraction in writeresults section to fit multiple epochs analysis
+			' delete the extra lines in printout headline
+			' simplify the summary output
+' Version 4.2	' allow window discriminator to pick troughs
+			' allow go back to spike detection if bursts failed. 
+			' allow adding burst to the exising channel.
+' Version 4.3   ' edited to allow it to count spike events correctly for Spike2 version 8.04 and up
+            ' to find edits search for "EDITED BY WS"
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'************************ DECLARE GLOBLE VARIABLES ******************************************************************
+
+
+var fh%;					' current window handle
+var experimenter$;  		' name of experimenter
+var dated$;  				' date of experiment
+var comment$;  			' comments on experiment/conditions
+var manipulation$; 			' experiment manipulation
+var pattern$; 				' experiment pattern
+var onset$; 				' onset of pattern
+var duration$; 			' duration of pattern
+var prep$;  				' status of the Prep (i.e. upper end cut, etc)
+var logfilename$; 			' name of log file
+var path$; 				' path name for saving file
+var path2$; 				' path name for opening file
+var list%[100];        		' channel list
+
+
+var ok%;					' single if else flow controler
+var again%;				' repeat the analysis in another time range	
+var skipwave%;				' use the existing event channle
+var done$;				' tollbar exit
+var phasequery%;			' perform phase analysis?
+var summary%;				' write only summary?
+var xlv%; 				' write XL-friendly version of printlog?
+Const percent$ := "%";
+Const na$ := "N/A";
+
+
+const N%	:= 11;			' max number of neurons	
+var i%;					' neuron count
+var number1%;				' total number of neurons			 
+var neuronname$[N%];		' Neuron name
+var inputCh%[N%];    		' data channel
+var eventCh%[N%];			' event channel to write final output to
+var BurstCh%[N%];			' Burst channel; 
+var phaseok$[N%];		' phase analysis selection for each channel: yes, no and reference
+var trigch%; 				' event trigger channel 
+var PhaseCh%	:= 1;		' channel used as reference in phase analysis 
+
+
+var sTime;				' range of time to be analyzed
+var eTime;				' spike sorting paramter
+var windowdiscrim$[N%];
+var direction$[N%];		' detect peak or trough with the windowdiscrim%
+var updown%[N%]; 			' 2 for picking rising waveform. 3 = falling
+var setCutOff[N%];			' horizontal cursor that allows events only ABOVE it to be picked up (used regardless)
+var setCutOff1[N%];			' horizontal cursor that allows events only BELOW it to be picked up (only used with window disriminator)	
+var peakdiff[N%]; 			' in ms, minimal delay between spikes
+
+var MinBurstSep[N%];		' in sec, THE MINIMUM TIME BETWEEN SPIKES THAT SHOULD BE INCLUDED IN ONE BURST
+var Maxfirstdiff[N%];		' in ms, the maximal interval of the first two spikes in a burst
+var minspikes%[N%];			' minimal spikes/burst
+
+var burstnum%[N%];			' total burst number 		
+var periodnum%[N%];			' total cycle used for period calculation
+var phasenum%[N%];			' total burst number included for phase analysis
+var sBurst[N%]; 			' start and end of each burst
+var eBurst[N%];
+
+var X[N%][9];			' array to store spike count and burst timing for the current burst
+const resDuration%	:= 0;	' Index for store duration, spike and spike freq.
+const resSpikes%	:= 1;
+const resSpikeFreq%	:= 2;
+const resPeriod%	:= 3;	' array to store period and frequency for the current burst
+const resFrequency%	:= 4;	
+const PhaseOn%		:= 5;	' array to store phase on/off time of the current busrt 
+const PhaseOff%	:= 6;
+const dutycycle% 	:= 7;	
+const latency%		:= 8;
+
+var burstduration[N%][4]; 		' array to store the summary data of all bursts: sum, mean, sum of dquare, standard deviation
+var burstspikenum[N%][4];		' spike number
+var burstspikefreq[N%][4];  		' spike frequency in burst
+var cycleperiod[N%][4];
+var cyclefreq[N%][4];
+var phaseon[N%][4];
+var phaseoff[N%][4];
+var dutycycle[N%][4];
+const total%		:= 0;
+const sqtotal%		:= 1;
+const mean%		:= 2;
+const sd%			:= 3;
+
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'************************ Main Structure of the program ******************************************************************
+
+InfoPreparation();					' call fucntion to request general information
+
+InfoWaveCh(); 
+InitializeDetection();		' call fucntion to initialize the paramter for detecting spikes and bursts, this has to follow the wavech.
+InfoBurstCh();
+
+
+again%	:=0;
+Repeat
+	SetTimeRange();					' call fuction to set the time range of interests
+	View(fh%);										' chance to quit the program
+
+	if not skipwave% then 
+		DETECTEVENTS();					' call function to detect spikes and bursts
+	endif;
+	REPORT();							' call fucntion to compute and export the spike and burst results
+	again%	:= Query("analyze the same neruons in next time window?", "Yes", "No");
+until not again%;
+
+
+
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'************************ PART I. Generate spike and burst channels for each neuron *****************************************
+
+proc	DETECTEVENTS()
+var proceed%;
+var bothok%;
+
+For i%	:= 1 to number1% do
+	ChanHide(-1);										' display the current channel 
+	ChanShow(inputCh%[i%],EventCh%[i%], BurstCh%[i%], trigch%);
+	View(fh%);										' chance to quit the program
+
+	ok% := Query("Analyze "+ neuronname$[i%]+" or quit program?", "Analyze", "Quit");
+	if not ok% then 	Halt; 	endif;
+		
+	Repeat
+		proceed%	:= Query("Make Spikes? ", "yes", "No");		' Call fuction to generate spike	
+		if Proceed% then	GenerateSpikes();	endif;
+		
+		Proceed%	:= Query ("Add/delete spikes?","No","yes"); 		' call function to edit the spike channel
+		if not Proceed% then	SpikeEDIT(); 	endif;		
+		
+		proceed%	:= Query("Make Burst? ", "yes", "No");			' call function to generate burst
+		if Proceed% then	GenerateBursts();	endif;
+
+		bothok%	:= Query("spikes and Bursts both OK?", "Yes", "No");	' chance to repeat the whole loop
+	until bothok%;
+Next;
+
+end;
+
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'************************ PART II. Analyze and write results for all the neurons *****************************************
+
+proc REPORT()
+
+PhaseCh%	:= 1;
+ChanShow(EventCh%[:number1%+1],BurstCh%[:number1%+1],trigch%);
+Interact("Inspect the events and select the phase reference channel", 1023,"","Enter:GO|0x0d");
+phasequery%  	:= Query("Would you like to include a phase analysis?", "Yes", "No");
+if phasequery% then	SetPhaseCh();	endif;				' call fucnion to find out phase reference channel 	
+
+ok% := Query("Write individual results for each burst? ");	' Call function to analysze andreport individual burst results		
+if ok% then
+	summary% := 0;
+	WriteResults();
+	ok% := Query("Would you like to save this file?", "Yes", "No");		' call function to save the file
+	if ok% then filesave1();	endif;
+endif;
+
+ok% := Query("Write just summaries?");					' call function to analyze and report summary of all bursts
+if ok% then
+	summary% := 1;
+	WriteResults();
+	ok% := Query("Would you like to save this file?", "Yes", "No");		' call function to save the file
+	if ok% then filesave1();	endif;	
+	
+endif;
+
+windowvisible(0);									' back to original data window
+View(fh%);
+windowvisible(3);
+
+end;
+
+
+
+
+'**********************************************************************************************************
+'**********************************************************************************************************
+'**********************************************************************************************************
+'***************** Part I.1 Generate spikes with therholds ***********************************************
+
+Proc GenerateSpikes()
+
+'MemDeleteTime(eventCh%[i%], 3, sTime, eTime);		' clean the evetn channel;
+
+var	spikeok%	:= 1;
+repeat
+	if again% and spikeok% then					' omit munual setting if reuse the old setting
+	else SetSpikeParameter(); endif;				' Call function to set the spike parameters
+
+
+	docase
+	case windowdiscrim$[i%] <>"no" and direction$[i%] = "peak" then						' make spikes
+		SetWindowdiscriminator1();			' call function to make spikes with window discriminator
+	case windowdiscrim$[i%]<>"no" and direction$[i%] <>"peak" then
+		SetWindowdiscriminator2();
+	else		
+		MemImport(eventCh%[i%], inputCh%[i%], sTime, eTime, updown%[i%], peakdiff[i%], setCutOff[i%]);	
+	endcase;
+
+	ChanShow(eventCh%[i%]); 										' inspect spikes, if not satified delete spikes and loop back
+	Interact("Inspect the Spikes",1023,"","Enter:GO|0x0d");
+	spikeok%	:= Query("SPike setting OK?","Yes","No");
+	if not spikeok% 											
+	then		MemDeleteTime(eventCh%[i%], 3, sTime, eTime);	endif;
+
+until spikeok%;												
+
+'ok%	:= Query ("Proceed to burst or Manually add/delete spikes?","Proceed","Add/del"); 
+'if not OK% then	SpikeEDIT(); endif;								' call function to edit the spike channel
+
+end;
+
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'**************** Part I.2 calculate bursts based from spikes ****************************************************************
+
+
+proc GenerateBursts()
+
+'MemDeleteTime(BurstCh%[i%], 3, sTime, eTime);
+
+var burstok%	:= 1;
+repeat
+	if again% and burstok% then									' omit maunal setting if reuse the old setting
+	else											
+		MinBurstSep[i%]	:= Input("Maximal interspike interval to be count in same burst (0.01-10 seconds):", MinBurstSep[i%], 0.01, 10);	
+		Maxfirstdiff[i%]	:= Input("Maximal first interspike interval (1-5000 ms):", Maxfirstdiff[i%]*1000, 1, 5000);												
+		minspikes%[i%]		:= Input("minimum number of spikes to make a burst (2-100)", minspikes%[i%], 2, 100);
+		Maxfirstdiff[i%]	/= 1000;
+	endif;
+
+	BurstMake(BurstCh%[i%], eventCh%[i%], sTime, eTime, MinBurstSep[i%], Maxfirstdiff[i%], minspikes%[i%]);	' make bursts
+	
+	ChanShow(BurstCh%[i%]);										' inspect bursts, if not satified delete bursts and loop back
+	Interact("Inspect the bursts",1023,"","Enter:GO|0x0d");		
+	burstok%	:= Query("Burst parameter OK?","Yes","No");
+	if not burstok% 
+	then		MemDeleteTime(BurstCh%[i%], 3, sTime, eTime);	endif;
+
+until burstok%;
+
+end;
+
+
+
+
+
+'**********************************************************************************************************
+'**********************************************************************************************************
+'**********************************************************************************************************
+'***************** Part I.1.1 set spike detection parameters ***********************************************
+
+Proc SetSpikeParameter()
+
+
+'globle variables:
+'var setcutoff[i%];
+'var	inputCh%[i%];
+'var windowdiscrim$[i%];
+'var direction$[i%];
+'var setCutOff1[i%];
+'var updown%[i%];
+'var peakdiff[i%];
+
+HCursorDelete(-1);							' Creat a new Horizonal cursor
+If setCutOff[i%] = 0 
+then HCursorNew(inputCh%[i%]); 
+else	HCursorNew(inputCh%[i%],setCutOff[i%]); endif;
+
+windowdiscrim$[i%] := Input$("Does this neuron need a window discriminator? {yes/no)", "no",3, "yes, no");
+If windowdiscrim$[i%]<>"no" then
+	direction$[i%]:= Input$("use the peak / trough of the wavefrom?", direction$[i%] , 6, "peak,trough");
+	Interact("Place the first horizontal cursor so that " + direction$[i%] + " detected by it will be included...", 1023,"","Enter:GO|0x0d" ); 
+	setCutOff[i%] := HCursor(1);
+
+	If setCutOff1[i%] = 0 
+	then HCursorNew(inputCh%[i%]);
+	else	HCursorNew(inputCh%[i%],setCutOff1[i%]); 
+	endif;
+	Interact("Place the second horizontal cursor so that " + direction$[i%] + " detected by it will be excluded...", 1023,"","Enter:GO|0x0d" ); 
+	setCutOff1[i%] :=HCursor(2);
+else
+	Interact("Place the horizontal cursor at desired spike detection threshold...", 1023,"","Enter:GO|0x0d" );
+	setCutOff[i%] := HCursor(1);
+	updown%[i%]	:=input("detect rising (2) or falling (3) waveform?",updown%[i%]);
+endif;
+
+
+peakdiff[i%] 	:= Input("minimum delay from one spike to another in ms?", peakdiff[i%]*1000, 0, 5000);
+peakdiff[i%] 	/= 1000;	
+
+end;
+
+
+
+'**********************************************************************************************************
+'**********************************************************************************************************
+'**********************************************************************************************************
+'***************** Part I.1.2 Make SPikes with WindowDiscriminator ***********************************************
+
+proc SetWindowdiscriminator1()
+
+var eventCh1%;							' temporary channel to store rising time of spike picked up by setCutOff1
+var eventCh2%; 						' temporary channel to store falling time of spike picked up by setCutOff1			
+var punkta; 							' current spike rising time
+var punktb; 							' current spike falling time 
+var peakamp; 							' current spike peak voltage
+
+eventCh1% 	:= MemChan(3);	
+eventCh2% 	:= MemChan(3);						
+MemImport(eventCh1%, inputCh%[i%], sTime, eTime, 2, peakdiff[i%], setCutOff[i%]);	' rising evenet
+MemImport(eventCh2%, inputCh%[i%], sTime, eTime, 3, 0.0005, setCutOff[i%]); 'minimum delay set to 0,5ms since all rising waveforms MUST be followed by a falling
+
+punkta:=sTime;		
+while punkta>0 do 
+	punkta:=nexttime(eventCh1%,punkta); 						'rising time of spike
+	punktb:=nexttime(eventCh2%,punkta); 						'falling time of spike
+
+	if punkta>0 											'find amplitude of spike
+	then 	peakamp:=ChanMeasure(inputCh%[i%],8,punkta,punktb);  
+	endif;
+
+	if peakamp < setCutOff1[i%] 								'compare peak with offset and write to channel
+	then 	MemSetItem(eventCh%[i%],0,punkta); 
+	endif;
+wend;  
+'ChanDelete(eventCh1%);
+'ChanDelete(eventCh2%);
+end;
+
+
+
+
+proc SetWindowdiscriminator2()
+'globle variables:
+'var inputCh%, eventCh%;
+'var sTime, eTime;
+'var peakdiff, setCutoff, setCutoff1;
+
+
+var eventCh1%;							' temporary channel to store rising time of spike picked up by setCutOff1
+var eventCh2%; 						' temporary channel to store falling time of spike picked up by setCutOff1			
+var punkta; 							' current spike rising time
+var punktb; 							' current spike falling time 
+var peakamp; 							' current spike peak voltage
+
+eventCh1% 	:= MemChan(3);	
+eventCh2% 	:= MemChan(3);						
+MemImport(eventCh1%, inputCh%[i%], sTime, eTime, 3, peakdiff[i%], setCutOff[i%]);	' rising evenet
+MemImport(eventCh2%, inputCh%[i%], sTime, eTime, 2, 0.0005, setCutOff[i%]); 'minimum delay set to 0,5ms since all rising waveforms MUST be followed by a falling
+
+punkta:=sTime;		
+while punkta>0 do 
+	punkta:=nexttime(eventCh1%,punkta); 						'rising time of spike
+	punktb:=nexttime(eventCh2%,punkta); 						'falling time of spike
+
+	if punkta>0 											'find amplitude of spike trough
+	then 	peakamp:=ChanMeasure(inputCh%[i%],9,punkta,punktb);  
+	endif;
+
+	if peakamp > setCutOff1 [i%]								'if trough is above the second threshold then take the event
+	then 	MemSetItem(eventCh%[i%],0,punkta); 
+	endif;
+wend;  
+'ChanDelete(eventCh1%,eventCh2%);
+
+end;
+
+
+
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'****************** Part II.2.1 Write the results ****************************************************************************
+
+
+proc WriteResults()
+
+InitializeReport();							' call function to set all report variables to zero
+PRINTexperiment();							' call function to print expeirmnent information
+
+for i% := 1 to number1% do 
+	sBurst[PhaseCh%] 	:= sTime;
+	eBurst[PhaseCh%] 	:= sTime;
+	sBurst[i%] := NextTime(BurstCh%[i%], sTime);
+	eBurst[i%] := NextTime(BurstCh%[i%], sBurst[i%]);
+    
+    'EDITED BY WS TO MAKE IT WORK FOR SPIKE 2 ver 8.04 and up
+        eBurst[i%] := eBurst[i%]+BinSize(BurstCh%[i%]);
+    ' END EDITING
+    
+	while sBurst[i%] >= 0 and eBurst[i%] >= 0 and sBurst[i%] < eTime and eBurst[i%] < eTime do	' check if the birst is within range
+	
+		AnalyseNeuron(i%, sBurst[i%], eBurst[i%]);			' call function to analysze basic burst and spike infor for all neruons
+		AnalysePeriod(i%, sBurst[i%], eBurst[i%]);			' call function to analyze period and frequency for the current neruon
+		if phasequery% AND phaseok$[i%]<>"no" AND X[i%][phaseon%]>-777 then
+			AnalysePhase(i%, sBurst[i%], eBurst[i%]);		' call function to analyze phase for the cuurrent neruon
+		endif;										
+		AnalyzeAccumulate ();							' accumulate the results	
+		if summary% =0 then	PRINTburstTAB();			endif;			' wtite individual neuron in TAB form
+														
+		sBurst[i%] := NextTime(BurstCh%[i%], eBurst[i%]);				'move to the next burst
+		eBurst[i%] := NextTime(BurstCh%[i%], sBurst[i%]);
+        
+        'EDITED BY WS TO MAKE IT WORK FOR SPIKE 2 ver 8.04 and up
+            eBurst[i%] := eBurst[i%]+BinSize(BurstCh%[i%]);
+        ' END EDITING
+        
+	wend;													' end of all cycles
+	
+	Analyzepopulation ();						' calculate the summary results for all the bursts
+ 	PRINTsummaryTAB();					' write summary in TAB																					
+	PrintLog("______________________________________________________________________________________________________________________________________\n");
+	PrintLog("______________________________________________________________________________________________________________________________________\n\n\n");
+next;						' end of the analysis and output, loop back to the next neuron 
+
+View(LogHandle());
+windowvisible(3);
+Interact("Inspect results and press OK to continue...", 1023,"","Enter:GO|0x0d");
+
+end;
+
+
+
+
+'**************************************************************************************************************
+'**************************************************************************************************************
+'**************************************************************************************************************
+'********************* Part math.1 obtain pike count and burst timing of each burst **********************
+
+proc AnalyseNeuron(k%, sBst, eBst)
+	X[k%][resDuration%]   	:= eBst - sBst;
+	X[k%][resSpikes%] 		:= Count(eventCh%[k%], sBst, eBst);
+	X[k%][resSpikeFreq%] 	:= (X[k%][resSpikes%]-1)/X[k%][resDuration%];
+end;
+
+
+
+'**************************************************************************************************************
+'**************************************************************************************************************
+'**************************************************************************************************************
+'********************* Part math.2 calculate period and frequency of each burst ***************************************
+
+proc AnalysePeriod(k%, periodon, eBst)
+var periodoff;
+var period; 
+var frequency;
+
+periodoff := Nexttime(BurstCh%[k%], eBst);
+
+if periodoff > 0 and periodoff < eTime then
+	period 	:= periodoff - periodon;
+	frequency	:= 1/period;
+else
+	period 	:= -777;
+	frequency := -777;
+endif;
+
+X[k%][resPeriod%] 	:= period;
+X[k%][resFrequency%] := 1/period;
+
+end;
+
+
+
+'**************************************************************************************************************
+'**************************************************************************************************************
+'**************************************************************************************************************
+'********************* Part math.3 calculate phase of each burst **********************************************
+
+proc AnalysePhase(k%, sBst, eBst)
+var phase0;
+var phase100; 					' 100% phase time from the reference
+var phaseon;					' phase on time 
+var phaseoff;					' phase off time
+var dutycycle;
+
+
+
+
+if phaseCh% = k% then
+	phase0		:= sBst;
+	phase100		:= NextTime(BurstCh%[k%], eBst);
+else
+	sBurst[PhaseCh%] 	:= NextTime(BurstCh%[PhaseCh%], eBurst[PhaseCh%]);
+	phase0			:= sBurst[PhaseCh%];
+	eBurst[PhaseCh%] 	:= NextTime(BurstCh%[PhaseCh%], sBurst[PhaseCh%]);
+	phase100			:= NextTime(BurstCh%[PhaseCh%], eBurst[PhaseCh%]);
+endif;
+
+if  phase100 > 0 AND phase100 <eTime  then 
+	phaseon 	:= (sBst-phase0)/(phase100-phase0)*100;				'
+	phaseoff 	:= (eBst-phase0)/(phase100-phase0)*100;
+	dutycycle	:= phaseoff - phaseon;
+else
+	phaseon 	:= -777;
+	phaseoff 	:= -777;
+	dutycycle	:= -777;
+endif;
+
+X[k%][phaseon%] := phaseon;
+X[k%][phaseoff%] := phaseoff;
+X[k%][dutycycle%] := dutycycle;
+
+end;
+
+
+
+'**************************************************************************************************************
+'**************************************************************************************************************
+'**************************************************************************************************************
+'********************* Part math.4 accumulate the intermediate results   **************************************
+
+proc AnalyzeAccumulate ()
+
+burstnum%[i%] 				+= 	1;
+burstduration[i%][total%] 	+=	X[i%][resDuration%];			' Accumulate the basic results
+burstduration[i%][sqtotal%] 	+=	X[i%][resDuration%] * X[i%][resDuration%];
+burstspikenum[i%][total%] 	+= 	X[i%][resSpikes%];
+burstspikenum[i%][sqtotal%] 	+=	X[i%][resSpikes%] * X[i%][resSpikes%];
+burstspikefreq[i%][total%] 	+= 	X[i%][resSpikeFreq%];
+burstspikefreq[i%][sqtotal%] 	+=	X[i%][resSpikeFreq%] * X[i%][resSpikeFreq%];
+
+
+if X[i%][resPeriod%] > -777 then					' accumulate the cycle period result
+
+	periodnum%[i%]			+= 	1;
+	cycleperiod[i%][total%]	+= 	X[i%][resPeriod%];
+	cycleperiod[i%][sqtotal%]+= 	X[i%][resPeriod%] * X[i%][resPeriod%];
+	cyclefreq[i%][total%]	+= 	X[i%][resFrequency%];
+	cyclefreq[i%][sqtotal%]	+= 	X[i%][resFrequency%] * X[i%][resFrequency%];
+endif;
+
+if X[i%][phaseon%] > -777 and phasequery% then		' accumulate the phase results
+	Phasenum%[i%]			+= 	1;
+	phaseon[i%][total%]	 	+=	X[i%][phaseon%];
+	phaseon[i%][sqtotal%]	+= 	X[i%][phaseon%] * X[i%][phaseon%];
+	phaseoff[i%][total%]	+=	X[i%][phaseoff%];
+	phaseoff[i%][sqtotal%] 	+= 	X[i%][phaseoff%] * X[i%][phaseoff%];
+	dutycycle[i%][total%]	+=	X[i%][dutycycle%];
+	dutycycle[i%][sqtotal%] 	+= 	X[i%][dutycycle%] * X[i%][dutycycle%];
+endif;
+end;
+
+	printlog("cycleperiodsqtotal:	%f \n, cycleperiodtotal:	  %f \nburstnum:	%f\n",cycleperiod[i%][sqtotal%],cycleperiod[i%][total%],burstnum%[i%]);
+
+
+'**************************************************************************************************************
+'**************************************************************************************************************
+'**************************************************************************************************************
+'********************* Part math.5 calculate the population summary   **********************************************
+
+proc Analyzepopulation ()
+
+if burstnum%[i%]>0 then
+	burstduration[i%][mean%] := burstduration[i%][total%]/burstnum%[i%];
+	burstspikenum[i%][mean%] := burstspikenum[i%][total%]/burstnum%[i%];
+	burstspikefreq[i%][mean%] := burstspikefreq[i%][total%] /burstnum%[i%];
+
+	if burstnum%[i%]>1 then	
+		burstduration[i%][sd%]	:= (burstduration[i%][sqtotal%] - burstduration[i%][total%]*burstduration[i%][total%]/burstnum%[i%])/(burstnum%[i%]-1);
+		burstduration[i%][sd%] 	:= sqrt(burstduration[i%][sd%]);
+		
+		burstspikenum[i%][sd%]	:= (burstspikenum[i%][sqtotal%] - burstspikenum[i%][total%]*burstspikenum[i%][total%]/burstnum%[i%])/(burstnum%[i%]-1);
+		burstspikenum[i%][sd%]	:= sqrt(burstspikenum[i%][sd%]);
+		
+		burstspikefreq[i%][sd%] 	:= (burstspikefreq[i%][sqtotal%] - burstspikefreq[i%][total%]*burstspikefreq[i%][total%]/burstnum%[i%])/(burstnum%[i%]-1);
+		burstspikefreq[i%][sd%] 	:= sqrt(burstspikefreq[i%][sd%]);
+	endif;
+endif;
+
+if Periodnum%[i%]>0 then
+	cycleperiod[i%][mean%] 	:= cycleperiod[i%][total%]/Periodnum%[i%];
+	cyclefreq[i%][mean%] 	:= cyclefreq[i%][total%]/Periodnum%[i%];
+
+	if Periodnum%[i%]>1 then
+	
+		cycleperiod[i%][sd%] 	:= (cycleperiod[i%][sqtotal%] - cycleperiod[i%][total%] * cycleperiod[i%][total%]/Periodnum%[i%])/(Periodnum%[i%]-1);
+		cycleperiod[i%][sd%] 	:= sqrt(cycleperiod[i%][sd%]);
+		
+		cyclefreq[i%][sd%] 		:= (cyclefreq[i%][sqtotal%] - cyclefreq[i%][total%] * cyclefreq[i%][total%]/Periodnum%[i%])/(Periodnum%[i%]-1);
+		cyclefreq[i%][sd%] 		:= sqrt(cyclefreq[i%][sd%]);
+	endif;
+endif;
+
+
+if phasequery% AND phaseok$[i%]<>"no" AND phasenum%[i%]>0 then	
+	phaseon[i%][mean%] 	:= phaseon[i%][total%]/phasenum%[i%];
+	phaseoff[i%][mean%] := phaseoff[i%][total%]/phasenum%[i%];
+	dutycycle[i%][mean%]:= dutycycle[i%][total%]/(phasenum%[i%]);
+
+	if phasenum%[i%]>1 then
+		phaseon[i%][sd%] 	:= (phaseon[i%][sqtotal%] - phaseon[i%][total%] * phaseon[i%][total%]/phasenum%[i%])/(phasenum%[i%]-1);
+		phaseon[i%][sd%] 	:= sqrt(phaseon[i%][sd%]);
+		
+		phaseoff[i%][sd%] 	:= (phaseoff[i%][sqtotal%] - phaseoff[i%][total%] * phaseoff[i%][total%]/phasenum%[i%])/(phasenum%[i%]-1);
+		phaseoff[i%][sd%] 	:= sqrt(phaseoff[i%][sd%]);
+	
+		dutycycle[i%][sd%] 	:= (dutycycle[i%][sqtotal%] - dutycycle[i%][total%] * dutycycle[i%][total%]/phasenum%[i%])/(phasenum%[i%]-1);
+		dutycycle[i%][sd%] 	:= sqrt(dutycycle[i%][sd%]);
+	 endif;
+endif;
+
+end;
+
+
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'************************* Part prepare.2 	ASK USER INTRODUCTORY QUESTIONS **************************************************
+
+
+proc InfoPreparation()
+
+fh% := View();	
+windowVisible(3);							' check if the data fiel is open
+if ViewKind() <> 0 then   					' Note, no argument for compatibility with mac...
+	Message("Current view must be a data-file...");
+Halt;	endif;
+
+HCursorDelete(-1);
+view(fh%);					' ask for experimental information
+windowVisible(3);
+Interact("Inspect DATA ......",1023,"","Enter:GO|0x0d");
+
+DlgCreate("Hello");
+DlgString(1, "Your name, please.", 50);
+DlgString(2, "The date of the experiment, please.", 50);
+DlgString(3, "Status of STNS?", 100);
+DlgString(4, "Manipulation (if any)?", 5000);
+DlgString(5, "Motor Pattern?", 100);
+DlgString(6, "Motor Pattern Onset after Manipulation?", 50);
+DlgString(7, "Duration of resulting motor pattern?", 50);
+DlgString(8, "Any other comments?", 5000);
+ok% := DlgShow(experimenter$, dated$, prep$, manipulation$, pattern$, onset$, duration$, comment$);
+if not ok% then Halt; endif;
+
+end;
+
+
+
+
+
+proc InfoWaveCh()	
+
+view(fh%);
+DlgCreate("# of channles");					' ask for total number of neurons
+DlgInteger(1, "How many neurons would you like to compare (1 to 10)?", 1, 10);
+DlgChan(2, " stimulation event channel(optional, ch31 default)",2+4+8);
+ok% := DlgShow(number1%,trigch%);
+if not ok% then Halt; endif;
+InputCh%[0]	:= number1%;
+EventCh%[0]	:= number1%;
+BurstCh%[0]	:= number1%;
+
+view(fh%);
+var dummylabel%;					' ask for channel and neuron information
+DlgCreate("Select a neuron to analyse");
+For i% :=1 to number1% do 
+	DlgChan(i%, "Channel #"+str$(i%),17);
+	DlgString(i%+number1%+1, "Name of neuron"+str$(i%),9);
+	DlgLabel(number1%+1, "______________________________________________________________________");	
+next;
+ok% := DlgShow(inputCh%[1:number1%],dummylabel%, neuronname$[1:number1%]);
+if not ok% then Halt; endif;		
+	
+ChanHide(-1);						' display the channels
+ChanShow(InputCh%[:Number1%+1],trigCh%);			
+
+end;
+					
+
+
+
+proc InfoBurstCh()	
+
+var Chexist%;
+var dummyCh%;
+
+Chexist%	:= Query("Use the existing Spike and Burst Channels?", "Yes", "No");
+if Chexist% then	
+	view(fh%);
+	var dummylabel%;					' ask for channel and neuron information
+	DlgCreate("Select event channels");
+	For i% :=1 to number1% do 
+		DlgChan(i%, "Spike Channel for "+neuronname$[i%]+" (select Ch31 for new Channel)",2+8);
+		DlgChan(i%+number1%+1, "Burst Channel for "+neuronname$[i%]+"(select Ch31 for new Channel)",4+8);
+		DlgLabel(number1%+1, "_______________________________________________________________________________");	
+	next;
+	ok% := DlgShow(EventCh%[1:number1%],dummylabel%, BurstCh%[1:number1%]);
+	if not ok% then Halt; endif;
+
+	For i% :=1 to number1% do 							
+
+		if eventCh%[i%] = 32 or eventCh%[i%] <= 30 then		' copy the channel into memory if saved channels is selected
+			dummyCh%	:= MemChan(3);
+			MemImport(dummyCh%, eventCh%[i%], 0, maxTime(BurstCh%[i%]));
+			'ChanDelete(eventCh%[i%]);
+			eventCh%[i%]	:= dummyCh%;
+		endif;
+
+		if BurstCh%[i%] = 32 or BurstCh%[i%] <= 30 then
+			dummyCh%	:= MemChan(4);
+			MemImport(dummyCh%, BurstCh%[i%], 0, maxTime(BurstCh%[i%]));
+			'ChanDelete(BurstCh%[i%]);
+			BurstCh%[i%]	:= dummyCh%;
+		endif;
+
+		if eventCh%[i%] = 31 then						' creat new channles if CH31 is selcted
+			eventCh%[i%]	:= MemChan(3);		
+		else
+			ChanShow(EventCh%[i%]);						' display the channles if it exists.
+		endif;
+		
+		if BurstCh%[i%] = 31 then
+			BurstCh%[i%]	:= MemChan(4);					
+		else
+			ChanShow(BurstCh%[i%]);	
+		endif;
+		ChanTitle$(eventCh%[i%], neuronname$[i%]);
+		ChanTitle$(BurstCh%[i%], neuronname$[i%]);
+
+	next;
+			
+else
+	For i% :=1 to number1% do 						' creat new channels if selected first time
+		eventCh%[i%]	:= MemChan(3);					
+		ChanTitle$(eventCh%[i%], neuronname$[i%]);
+		BurstCh%[i%]	:= MemChan(4);					
+		ChanTitle$(BurstCh%[i%], neuronname$[i%]);
+	next;
+endif;
+	
+end;
+		
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'*********************** Part prepare.3 Display data channel and set time range to analyze ****************************
+
+Proc SetTimeRange()
+
+CursorDelete(-1);					' Select region
+CursorNew();
+CursorNew();
+Interact("Place vertical cursors around the region to be analysed. Cursor 1 = Start time and Cursor 2 = End time...", 1023,"","Enter:GO|0x0d");
+CursorRenumber();
+sTime := Cursor(1);
+eTime := Cursor(2);
+XRange(sTime - (eTime - sTime)/5, eTime + (eTime - sTime)/5);
+end;
+
+
+
+
+'**************************************************************************************************************
+'**************************************************************************************************************
+'**************************************************************************************************************
+'********************* Part Prepare.4 INitialization	************************************** ********************************
+
+proc InitializeDetection()
+for i% := 1 to number1% do 
+	'EventCh%[i%]	:= 0; 				' initalize detection paramters
+	'BurstCh%[i%]	:= 0; 
+	updown%[i%]	:= 2;				' 2 for rising
+	peakdiff[i%]	:= 5./1000.0;			' 5 ms
+	MinBurstSep[i%]:= 0.2;				' 0.2 sec
+	Maxfirstdiff[i%]:= 200./1000.;				' 200 ms
+	minspikes%[i%]	:= 2;				' 2 spikes/burst
+	direction$[i%]	:= "peak";
+next;
+end;
+	
+
+
+proc InitializeReport()
+var j%;
+
+for i% := 1 to number1% do 
+	burstnum%[i%] 		:=0;	 
+	periodnum%[i%]		:=0;
+	phasenum%[i%] 		:=0;				' initalize all cumulative the variables
+	X[i%][phaseon%]	:=0;
+	X[i%][resperiod%]	:=-777;
+
+	for j% := 0 to 3 do
+		burstduration[i%][j%]	:= 0; 
+		burstspikenum[i%][j%]	:= 0;	
+		burstspikefreq[i%][j%]	:= 0;  
+		cycleperiod[i%][j%]		:= 0;
+		cyclefreq[i%][j%]		:= 0;
+		phaseon[i%][j%]		:= 0;
+		phaseoff[i%][j%]		:= 0;
+		dutycycle[i%][j%]		:= 0;
+	next;
+next;
+end;
+
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'****************** Part Prepare.5 Select the phase reference channle ************************************************************
+
+Proc SetPhaseCh()
+var ok%;
+var found%	:= 0;
+
+PhaseCh%	:= 0; 
+repeat
+	DlgCreate("Phase analysis: One of the Channel must be reference");
+	for i% := 1 to number1% do 
+		DlgString(i%, chanTitle$(BurstCh%[i%]),50,"",0,0, "reference|yes|no");
+	next;
+	ok%	:= DlgShow(Phaseok$[1:number1%]);
+	if not ok% then 	halt; 	endif;
+
+	i% := 0;										' record the phase channel index.
+	repeat 
+		i%	+=1;
+		if 	Phaseok$[i%] = "reference" then
+			phaseCh%	:= i%;
+ 			found%	:= 1;
+		endif;
+	until found% or i%=number1%
+until found%;
+
+end;
+
+
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'***************************************************************************************************************************
+'******************** part Tool.1  Edit spike channel **********************************************************************
+
+
+
+func SpikeEDIT()
+	done$	:= "n";
+	ToolbarClear();   															'set up toolbars
+	ToolbarSet(1, "Del|0x2e", spikeremove%); 											
+	ToolbarSet(2, "done", spikedone%);
+	ToolbarSet(3, "&Add", spikeAdd%);
+	Toolbartext(" Add and Remove spikes, check done after finishing");
+	repeat
+		Toolbar("Move along the data to find the items to remove",48);
+	until done$="y";
+end;	
+
+'--------------------------------------
+func spikedone%()						' function to escape 
+	done$	:= "y";
+	ToolbarClear();
+	ToolbarText("");
+end;
+
+'--------------------------------------
+func spikeremove%()						' function to remove items 
+	var deleteok%;
+	deleteok%	:= Query("Delete all spike in the current view", "yes", "no");
+	if deleteok% then
+		MemDeleteTime(EventCh%[i%], 3, XLow() ,XHigh());
+	endif;
+end;
+'--------------------------------------
+func spikeadd%()				' function to add item
+	if Cursor(1)>XHigh() or Cursor(1)<XLow() then			' bring cursor 2 in if it is out of view
+		CursorDelete(-1);    											     
+		CursorNew((Xhigh()+XLow())/2);
+	endif;
+	Interact(" place cursor 1 at the time to add item", 1023,"","Enter:GO|0x0d");
+	MemSetItem(EventCh%[i%], 0, Cursor(1));
+end;
+
+
+
+
+
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'*************************** PART Tool.2 Save files  *****************************************************************
+func filesave1()
+
+DlgCreate("Hello");
+DlgString(1, "What would you like to call the file?", 40);
+ok% :=DlgShow(logfilename$);
+if not ok% then Halt; endif;
+FilePathSet(path$);
+FileSaveAs(logfilename$,1);
+
+end;
+
+
+
+
+
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'*************************** PART export.1: print experiment information  *****************************************************************
+
+proc PRINTexperiment()
+
+View(LogHandle());							' clean log window
+EditSelectAll();
+EditClear();
+
+View(fh%);
+
+PrintLog("\n\nFile: %s\n\n", FileName$());
+if experimenter$<>""then	PrintLog("Name of experimenter:  %s\n", experimenter$);	endif;
+if dated$<>"" 		then	PrintLog("Date of experiment:  %s\n", dated$);			endif;
+If prep$<>"" 		then	PrintLog("Status of the STNS:  %s\n", prep$);			endif;
+If manipulation$<>""then	PrintLog("Experimental manipulation:  %s\n", manipulation$);endif;
+If pattern$<>"" 	then	PrintLog("Motor Pattern analyzing:  %s\n", pattern$);					endif;
+If onset$<>"" 		then	PrintLog("Onset of motor pattern after manipulation:  %s\n", onset$);		endif;
+If duration$<>"" 	then	PrintLog("Duration of motor pattern after manipulation:  %s\n", duration$);endif;
+If comment$<>"" 	then	PrintLog("Other comments: %s \n", comment$);			endif;
+
+PrintLog("Start Time of Epoch Analyzed: %7.1f  End Time of Epoch Analyzed: %7.1f  Duration: %7.1f\n", sTime, eTime, eTime - sTime);
+PrintLog("Number of neurons: %d\n", number1%);
+PrintLog("Neurons Analyzed:  %s\n", neuronname$[1:number1%]);
+PrintLog("Phase reference: %s\n",neuronname$[phaseCh%]);
+
+PrintLog("______________________________________________________________________________________________________________________________________\n");
+PrintLog("______________________________________________________________________________________________________________________________________\n");
+
+View(fh%);
+
+end;
+
+
+
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'*************************** PART export.3: print individual result in TAB  *****************************************************************
+
+proc PRINTburstTAB()
+
+
+docase
+case  burstnum%[i%] = 1 then											' first burst
+PrintLog("Neuron	Burst#	Real Time of Burst Onset (sec)	Real Time of Burst Offset (sec)	Burst Duration (sec)	# of Spikes	Spike Frequency (Hz)	Instantaneous Period (sec)	Instantaneous Frequency (Hz)	Phase On 	Phase Off	dutycycle \n");
+PrintLog("%s	%d	%f	%f	%10.5f	%d	%10.5f	%10.5f	%10.5f	%f	%f	%f\n",
+	neuronname$[i%],burstnum%[i%], sBurst[i%], eBurst[i%], X[i%][resDuration%], X[i%][resSpikes%], X[i%][resSpikeFreq%],X[i%][resPeriod%], X[i%][resFrequency%], X[i%][phaseon%], X[i%][phaseoff%], X[i%][dutycycle%]);
+
+case X[i%][resPeriod%] > -777 and X[i%][phaseon%] > -777 then				' regular burst
+PrintLog("	%d	%f	%f	%10.5f	%d	%10.5f	%10.5f	%10.5f	%f	%f	%f\n",
+	burstnum%[i%], sBurst[i%], eBurst[i%], X[i%][resDuration%], X[i%][resSpikes%], X[i%][resSpikeFreq%],X[i%][resPeriod%], X[i%][resFrequency%], X[i%][phaseon%], X[i%][phaseoff%], X[i%][dutycycle%]);
+
+case X[i%][resPeriod%] = -777 then									' last burst
+PrintLog("	%d	%f	%f	%10.5f	%d	%10.5f	%s	%s	%s	%s	%s\n\n", 
+	burstnum%[i%], sBurst[i%], eBurst[i%], X[i%][resDuration%], X[i%][resSpikes%], X[i%][resSpikeFreq%], na$, na$, na$, na$, na$);
+
+case X[i%][phaseon%] = -777 then										' no phase infor
+PrintLog("	%d	%f	%f	%10.5f	%d	%10.5f	%10.5f	%10.5f	%s	%s	%s\n",
+	burstnum%[i%], sBurst[i%], eBurst[i%], X[i%][resDuration%], X[i%][resSpikes%], X[i%][resSpikeFreq%],X[i%][resPeriod%], X[i%][resFrequency%], na$, na$, na$);
+
+endcase;
+
+end;		
+
+
+
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'*************************** PART export.5: print summary result in TAB *****************************************************************
+
+proc PRINTsummaryTABold()
+	
+PrintLog("Neuron	# of Bursts	Mean Burst Duration(sec)	Mean # of Spikes	Mean Spike Frequency(Hz)	Mean Burst Period(sec)	Mean Burst Frequency(Hz)	Mean Phase-On(%)	Mean Phase-Off(%)	measn DutyCycle(%)\n");
+PrintLog("%s	%d	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f \n",
+	neuronname$[i%], burstnum%[i%], burstduration[i%][mean%], burstspikenum[i%][mean%], burstspikefreq[i%][mean%], cycleperiod[i%][mean%],  cyclefreq[i%][mean%], phaseon[i%][mean%],  phaseoff[i%][mean%], dutycycle[i%][mean%]);
+PrintLog("	# of phases	Burst Duration StDev	# of Spikes StDev	Spike Frequency StDev	Burst Period StDev	Burst Frequency StDev	Phase-On StDev	Phase-Off StDev \n");
+PrintLog("	%d	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f \n", 
+	phasenum%[i%], burstduration[i%][sd%], burstspikenum[i%][sd%], burstspikefreq[i%][sd%], cycleperiod[i%][sd%], cyclefreq[i%][sd%], phaseon[i%][sd%], phaseoff[i%][sd%],dutycycle[i%][sd%]);
+
+end;
+
+
+proc PRINTsummaryTAB()
+	
+PrintLog("Neuron		# of count		Burst Duration	Spike #/ Burst	Spike Freq	Burst Period	Burst Freq	Phase-On	Phase-Off	DutyCycle\n");
+Printlog("%s	 Bursts	%d	unit	second		Hz	second	Hz	%s	%s	%s\n", neuronname$[i%], burstnum%[i%], percent$, percent$, percent$);
+
+PrintLog("	Cycles	%d	MEAN	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f \n",
+				periodnum%[i%],	 burstduration[i%][mean%], burstspikenum[i%][mean%], burstspikefreq[i%][mean%], cycleperiod[i%][mean%],  cyclefreq[i%][mean%], phaseon[i%][mean%],  phaseoff[i%][mean%], dutycycle[i%][mean%]);
+PrintLog("	Phase Cycles	%d	STDEV	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f	%10.5f \n", 
+				phasenum%[i%], burstduration[i%][sd%], burstspikenum[i%][sd%], burstspikefreq[i%][sd%], cycleperiod[i%][sd%], cyclefreq[i%][sd%], phaseon[i%][sd%], phaseoff[i%][sd%],dutycycle[i%][sd%]);
+
+end;
+
+
+
+
+
+'**************************************************************************************************************************
+'**************************************************************************************************************************
+'**************************************************************************************************************************
+'*********************************** Part prepare.1 	Clean data	****************************************************
+proc cleanMemory()
+VAR i%;
+var list%[100];
+
+
+'ChanList(list%[] , 20480);                  	' delete all memory channels
+'if (list%[0] > 0) then
+	'for i% := 1 to list%[0] do
+		'ChanDelete(list%[i%]);				
+	'next;
+'endif;
+
+end;
+
+
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'*************************** PART export.2: print individual result in log  *****************************************************************
+
+proc PRINTburst()
+
+'basic burst/time information
+PrintLog("Neuron   Burst #       Real Time of Burst Onset (sec)       Real Time of Burst Offset (sec)\n");		 
+PrintLog("======   =======       ==============================       ===============================\n");
+PrintLog("  %s	    %d                         %f                                %f \n\n\n",
+	neuronname$[i%], burstnum%[i%],		sBurst[i%], 					eBurst[i%]);
+PrintLog("                    Burst duration (sec)         # of Spikes	        Spike Frequency (Hz) \n"); 	 
+PrintLog("                    ===================           ===========            ====================   \n");
+PrintLog("                        %10.5f                        %d                      %10.5f \n\n\n",
+				X[i%][resDuration%],		X[i%][resSpikes%],	 X[i%][resSpikeFreq%]);
+
+' period/frequency information
+PrintLog("                    Instantaneous Period (sec)         Instantaneous Frequency (Hz) \n");
+PrintLog("                    ==========================         ============================  \n");
+if  X[i%][resPeriod%] = -777 then
+PrintLog("                             N/A                          N/A  \n\n\n");
+else
+PrintLog("                           %10.5f                         %10.5f  \n\n",
+						X[i%][resPeriod%],		    		X[i%][resFrequency%]);
+PrintLog("                   *Calculated from onset of this burst to onset of the next burst. \n\n\n");
+endif;	
+
+
+if phasequery% AND phaseok$[i%]<>"no" then							
+PrintLog("                 Phase-On (%s of %s Cycle Period)      Phase-Off (%s)         dutycycle (%s) \n",	
+					percent$, neuronname$[phaseCh%],		percent$, 			percent$);
+PrintLog("                  ==============================     ==================     =====================   \n");
+	if X[i%][phaseon%] = -777 then
+PrintLog("                        N/A                            N/A                  N/A\n\n\n");
+	else
+PrintLog("                        %f                             %f                    %f\n\n\n\n\n\n",
+	X[i%][phaseon%],					X[i%][phaseoff%],				X[i%][dutycycle%]);
+	endif;
+endif;
+
+end;
+
+
+
+
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'***************************************************************************************************************************************
+'*************************** PART export.4: print summary result in log  *****************************************************************
+
+
+proc PRINTsummary()
+
+PrintLog("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
+PrintLog("					  %s Neuron Summary\n", neuronname$[i%]);
+PrintLog("					  _________________\n\n\n");
+PrintLog("# of Bursts		Mean Burst Duration	   Mean # of Spikes	   Mean Spike Frequency (Hz)\n");
+PrintLog("===========		===================	   ================	   =========================\n");
+PrintLog("    %d	 	    	   %10.5f		      %10.5f		  %10.5f\n\n\n",
+		burstnum%[i%],		 burstduration[i%][mean%],		 burstspikenum[i%][mean%], 		burstspikefreq[i%][mean%]);
+
+PrintLog("	 		Burst Duration StDev	   # of Spikes StDev	   Spike Frequency StDev(Hz)\n");
+PrintLog("			====================	   =================	   =========================\n");
+PrintLog("  			    %10.5f		     %10.5f	                %10.5f\n\n\n",
+					burstduration[i%][sd%],		 	burstspikenum[i%][sd%], 			burstspikefreq[i%][sd%]);
+
+PrintLog("			Mean Burst Period (sec)				   Mean Burst Frequency (Hz)  \n");
+PrintLog("			=======================				   =========================  \n");
+PrintLog("			    %10.5f				                %10.5f\n\n\n",
+					cycleperiod[i%][mean%],						cyclefreq[i%][mean%]);
+
+PrintLog("			Burst Period StDev (sec)			  Burst Frequency StDev (Hz)  \n");
+PrintLog("			========================			  ==========================  \n");
+PrintLog("			    %10.5f				                %10.5f\n\n\n",
+						cycleperiod[i%][sd%],						cyclefreq[i%][sd%]);
+
+
+if phasequery% AND phaseok$[i%]<>"no" then
+PrintLog("# of Bursts for phase 	Mean Phase-On (%s of %s Cycle Period)   Mean Phase-Off (%s)		dutycycle (%s) \n", 
+		percent$, neuronname$[PhaseCh%], percent$, percent$);
+PrintLog("======================	=====================================   =====================    ==========\n");
+PrintLog("	%d				%10.5f					 		%10.5f	 			%10.5f   \n\n\n",
+		Phasenum%[i%],			phaseon[i%][mean%],					phaseoff[i%][mean%],		dutycycle[i%][mean%]);
+PrintLog("	 			   Phase-On StDev	 		  Phase-Off StDev			dutycycle StDev \n" );
+PrintLog("				   ==============       		  ===============			===============\n");
+PrintLog("  			    	   %10.5f					%10.5f				%10.5f       \n\n\n",
+							phaseon[i%][sd%],				phaseoff[i%][sd%],		dutycycle[i%][sd%]);
+endif;
+end;
+
+'_______________________________________________________________________________________________________
+'The End
+

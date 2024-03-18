@@ -1,0 +1,151 @@
+'script measures instantaneous freq for all spikes contained within the cursors that you set.
+
+
+
+var n,x,a,b,c,d,e,f,g,h,i,z,q,r,s,p,time,time2, isi;
+var minint,minnumber,burstdura,log%,logfilename$,mainwin%, ok%, yes$, stimchanname$,spikechanname$, wavename$,spikeanzahl,frequenz;
+var minint2, minnumber2, start, stop, region, test1, test2, number, freq;
+var thresh:=0.001;
+
+
+'variables:
+'a
+'b channel with spike events
+'c channel with trigger events
+'d memchannel for bursts (level channel)
+'e memchannel for burstbeginning (event)
+'f memchannel for burst end (event)
+'g time of stimulus
+'h time of burstbeginning immediately before stimulus
+'i time of burstend after burstbeginning (var h)
+'n find next burstbeginning / end
+'t find next burstbeginning/ end
+'minint
+'minnumber
+'minint2
+'minnumber2
+'burstdura
+'mainwin%
+'z channel to analyze
+'q variable for spike event
+'r variable for next spike event
+'s counter variable
+'p	time variable
+'number
+
+'ok%
+'View (App(3));					'activate script view
+'WindowVisible(0);				'and make it disappear
+
+number:=0;
+minint:=0.8;
+minnumber:=5;
+b:=10;
+c:=12;
+
+'func trigger%(b%)
+'---------------------------------------
+'if trigmem% > 0 then ChanDelete(trigmem%); endif; 'loescht den eventch 1 usw...
+
+'DlgCreate("Set Trigger Channel");
+'DlgChan(1,"Select waveform data channel", 1);  'lists channels of a specific type to choose from
+
+'DlgShow(b);
+
+'c:=MemChan(3,0);
+CursorDelete(-1);       'delete all vertical cursors
+CursorNew(XLow()+1);     'makes new cursor at left in the window + 1 second
+CursorNew(Xhigh()-1);
+Interact("Place the cursors around the region to be analysed...", 1023);  'basically i think 1023 allows user to do what they need to
+															
+CursorRenumber(); 'renumbered cursor -> left cursor becomes cursor 1
+'HCursorDelete(1);HCursorNew(b);  'new horiz cursor
+'Interact("Position horizontal cursor", 1023);
+
+'thresh:=thresh*1000;
+'thresh:=Input("Minimum delay to next triggerpoint in ms?", thresh, 0, 5000);
+'thresh:=thresh/1000;
+
+start:=cursor(1); 'get the region to be analyzed into global variables
+stop:=cursor(2);
+printlog("start=",start,"stop=",stop);
+region:=(stop-start);
+
+'trigmem%:=MemChan(2);
+'MemImport(c, b, Cursor(1), Cursor(2), 2, thresh, HCursor(1)); 'write into memchan, cursor1 and cursor2 give start and stop times
+							'2 says look for when waveform crosses a level and the variable thresh tells it how long to wait before find next event
+ChanShow(c);
+'FrontView(View());Draw(0, 10);
+'test1:=Cursor(1);  '2 variable, which note the cursor positions
+'test2:=Cursor(2);
+start:=cursor(1);
+stop:=cursor(2);
+'return;
+
+'end;
+
+
+DlgCreate ("Identify Spike Channel");                                                                                                            'dialog window
+DLgChan(2, "Channel with spike events to analyze?",6);
+ok%:=DlgShow(b, b , minint, minnumber);
+
+if ok%=0 then
+halt;
+endif;
+
+'get names of original channels and file
+spikechanname$:=Chantitle$(b);
+stimchanname$:=Chantitle$(b);
+printlog(chantitle$(b));
+wavename$:=Filename$();
+
+'first delete logfile and write filename and channelnames
+
+mainwin%:=View();
+log%:=LogHandle(); 'get the logfile handle
+
+View(log%); 'go to logfile
+editselectall();
+editclear();
+Printlog("Filename:","  ",wavename$,"   ","Spikechannel:","  ",spikechanname$);
+Printlog("Start of Analysis(sec):  ", start,"     ","End of Analysis(sec):  ",stop," ");
+View(mainwin%); 'and back to main window
+
+
+printlog("These are the instantaneous firing frequencies (Hz): "," ");
+
+		  'To measure and report ISIs 
+		  
+h:=nexttime(b,start);  'find next spikes (first is immediately after Cursor1)
+		  time:=h;
+		 
+		  REPEAT
+				time2:=nexttime(b,time);
+				isi:=(time2-time);
+					if isi>0
+                    then
+                    freq:=0;
+                    freq:=1/isi;
+                    Printlog (frequency, "     ","," ,time);
+                    number:=number+1;
+					endif;
+				h:=time2;
+				time:=time2;
+		  UNTIL h>stop or h<0;
+number-=1;
+number/=region;
+'printlog("Avg Freq="," ",number);
+
+' and save the file
+
+View(log%); ' show it
+editselectall();
+editcopy();
+
+'yes$:=Input$("Results were copied to clipboard, save file now? (y/n)","n",1);
+
+'if yes$="y" then
+'FileSaveAs(logfilename$,1); ' save it
+'endif;
+
+View(mainwin%); 'and back to main window
